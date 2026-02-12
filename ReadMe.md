@@ -6,7 +6,7 @@ The analysis focuses on key performance metrics including:
 - Time gaps to pole position
 - Head-to-head teammate comparisons
 
-Built using Python with FastF1 and Panel, this tool offers a comprehensive view of Formula 1 qualifying performances since 2018.
+Built using Python with FastF1 and Panel, this tool offers a comprehensive view of Formula 1 qualifying performances from 2018 to 2024.
 
 ## Quick Start
 To view the pre-processed dashboard results directly:
