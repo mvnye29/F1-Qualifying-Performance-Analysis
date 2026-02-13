@@ -181,59 +181,9 @@ def calculate_teammate_gaps(team_data: pd.DataFrame) -> dict[str, float]:
     
     return gaps
 
-
-def detect_team_changes(driver_year_data: pd.DataFrame, all_events: list) -> list[dict]:
-    """
-    Detect when a driver changes teams during a season.
-    
-    Args:
-        driver_year_data: DataFrame containing driver's data for one year
-        all_events: List of all events in chronological order
-        
-    Returns:
-        List of team stint dictionaries with team, start_event, end_event, and events list
-    """
-    stints = []
-    current_team = None
-    current_stint = None
-    
-    # Create event order mapping
-    event_order = {event: idx for idx, event in enumerate(all_events)}
-    
-    # Sort driver's data by event order
-    driver_year_data = driver_year_data.copy()
-    driver_year_data['EventOrder'] = driver_year_data['EventName'].map(event_order)
-    driver_year_data = driver_year_data.sort_values('EventOrder')
-    
-    for _, row in driver_year_data.iterrows():
-        if row['TeamName'] != current_team:
-            # Team change detected or first stint
-            if current_stint is not None:
-                stints.append(current_stint)
-            
-            current_team = row['TeamName']
-            current_stint = {
-                'team': current_team,
-                'start_event': row['EventName'],
-                'end_event': row['EventName'],
-                'events': [row['EventName']]
-            }
-        else:
-            # Continue current stint
-            current_stint['end_event'] = row['EventName']
-            current_stint['events'].append(row['EventName'])
-    
-    # Add final stint
-    if current_stint is not None:
-        stints.append(current_stint)
-    
-    return stints
-
-
 def process_qualifying_data(quali_data: pd.DataFrame) -> list[dict]:
     """
     Process qualifying data to create a timeline of driver performances.
-    Now handles mid-season team changes by creating separate entries.
     
     Args:
         quali_data: DataFrame containing qualifying session data
@@ -258,71 +208,66 @@ def process_qualifying_data(quali_data: pd.DataFrame) -> list[dict]:
     if missing_columns:
         raise ValueError(f"Missing required columns: {missing_columns}")
     
+    
+    driver_team_mapping = {}
+    for year in quali_data['Year'].unique():
+        year_data = quali_data[quali_data['Year'] == year]
+        for _, row in year_data.iterrows():
+            key = (year, row['BroadcastName'])
+            if key not in driver_team_mapping:
+                driver_team_mapping[key] = row['TeamName']
+
     for year in quali_data['Year'].unique():
         logger.info(f"Processing year: {year}")
         year_data = quali_data[quali_data['Year'] == year]
         
-        all_events = year_data['EventName'].unique().tolist()
+        all_events = year_data['EventName'].unique()
+        
         year_drivers = set(year_data['BroadcastName'].unique())
         
         for driver in year_drivers:
-            # Get all data for this driver in this year
-            driver_year_data = year_data[year_data['BroadcastName'] == driver]
-            
-            # Detect team changes for this driver in this year
-            team_stints = detect_team_changes(driver_year_data, all_events)
-            
-            logger.info(f"  Driver: {driver} - Found {len(team_stints)} team stint(s)")
-            
-            # Create separate entries for each team stint
-            for stint in team_stints:
-                driver_entry = create_driver_entry(year, driver, stint['team'])
+            team = driver_team_mapping.get((year, driver))
+            if team is None:
+                continue
                 
-                # Add team stint information
-                driver_entry['teamStintInfo'] = {
-                    'startEvent': stint['start_event'],
-                    'endEvent': stint['end_event'],
-                    'eventRange': f"{stint['start_event']} - {stint['end_event']}" if stint['start_event'] != stint['end_event'] else stint['start_event'],
-                    'isPartialSeason': len(team_stints) > 1
-                }
+            driver_entry = create_driver_entry(year, driver, team)
+            timeline_data.append(driver_entry)
+            
+            # Process each event for this driver
+            for event_name in all_events:
+                event_data = year_data[year_data['EventName'] == event_name]
                 
-                timeline_data.append(driver_entry)
+                # Get pole time for the event
+                pole_data = event_data[event_data['Position'] == 1]
+                pole_time = pole_data.iloc[0]['Q3Seconds'] if not pole_data.empty else np.nan
                 
-                # Process only events within this team stint
-                for event_name in stint['events']:
-                    event_data = year_data[year_data['EventName'] == event_name]
+                # Get driver's data for this event
+                driver_event_data = event_data[event_data['BroadcastName'] == driver]
+                
+                if driver_event_data.empty:
+                    # Driver didn't participate in this event
+                    event_summary = create_event_summary(event_name, np.nan, np.nan, np.nan)
+                else:
+                    # Calculate gaps with teammates
+                    team_data = event_data[event_data['TeamName'] == team]
+                    gaps = calculate_teammate_gaps(team_data)
                     
-                    # Get pole time for the event
-                    pole_data = event_data[event_data['Position'] == 1]
-                    pole_time = pole_data.iloc[0]['Q3Seconds'] if not pole_data.empty else np.nan
+                    driver_data = driver_event_data.iloc[0]
+                    best_time = get_best_time(driver_data)
+                    qualifying_position = driver_data['Position'] if pd.notna(driver_data['Position']) else np.nan
                     
-                    # Get driver's data for this event
-                    driver_event_data = event_data[event_data['BroadcastName'] == driver]
+                    gap_to_pole = calculate_gap_to_pole(qualifying_position, best_time, pole_time)
+                    event_summary = create_event_summary(event_name, qualifying_position, gap_to_pole, gaps.get(driver, np.nan))
                     
-                    if driver_event_data.empty:
-                        # Driver didn't participate in this event (shouldn't happen within stint)
-                        event_summary = create_event_summary(event_name, np.nan, np.nan, np.nan)
-                    else:
-                        # Calculate gaps with teammates at this team
-                        team_data = event_data[event_data['TeamName'] == stint['team']]
-                        gaps = calculate_teammate_gaps(team_data)
-                        
-                        driver_data = driver_event_data.iloc[0]
-                        best_time = get_best_time(driver_data)
-                        qualifying_position = driver_data['Position'] if pd.notna(driver_data['Position']) else np.nan
-                        
-                        gap_to_pole = calculate_gap_to_pole(qualifying_position, best_time, pole_time)
-                        event_summary = create_event_summary(event_name, qualifying_position, gap_to_pole, gaps.get(driver, np.nan))
-                        
-                        if not pd.isna(gap_to_pole):
-                            driver_entry['gapToPole_values'].append(gap_to_pole)
-                        if not pd.isna(gaps.get(driver)):
-                            driver_entry['teammateGap_values'].append(gaps[driver])
-                            driver_entry['completeDataCount'] += 1
-                    
-                    driver_entry['events'].append(event_summary)
-                    driver_entry['positions'].append(event_summary['position'])
-                    driver_entry['totalEvents'] += 1
+                    if not pd.isna(gap_to_pole):
+                        driver_entry['gapToPole_values'].append(gap_to_pole)
+                    if not pd.isna(gaps.get(driver)):
+                        driver_entry['teammateGap_values'].append(gaps[driver])
+                        driver_entry['completeDataCount'] += 1
+                
+                driver_entry['events'].append(event_summary)
+                driver_entry['positions'].append(event_summary['position'])
+                driver_entry['totalEvents'] += 1
     
     # Calculate final statistics
     for entry in timeline_data:
@@ -335,7 +280,7 @@ def process_qualifying_data(quali_data: pd.DataFrame) -> list[dict]:
         entry['avgTeammateGap'] = np.mean(valid_teammate_gaps) if valid_teammate_gaps else np.nan
         entry['dataCompleteness'] = entry['completeDataCount'] / entry['totalEvents'] if entry['totalEvents'] > 0 else 0
         
-        # Clean up temporary fields
+        # Clean up 
         for key in ['positions', 'gapToPole_values', 'teammateGap_values', 
                    'completeDataCount', 'totalEvents']:
             del entry[key]
